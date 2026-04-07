@@ -1,0 +1,20 @@
+{
+  "name": "stocktrade",
+  "version": "1.0.0",
+  "description": "Multi-agent stock trading system on Cloudflare Workers",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "db:init": "wrangler d1 execute stocktrade --file=schema.sql --remote",
+    "db:init:local": "wrangler d1 execute stocktrade --file=schema.sql --local",
+    "seed": "wrangler d1 execute stocktrade --file=seed.sql --remote",
+    "seed:local": "wrangler d1 execute stocktrade --file=seed.sql --local"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  },
+  "dependencies": {
+    "mimetext": "^3.0.28"
+  }
+}

@@ -1,0 +1,44 @@
+name = "stocktrade"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+account_id = "50b6386f0c33fc08153228e6a9e80de9"
+
+# Cron triggers — fire at both EST and EDT times, handler checks market status
+# Market open:  9:35 AM EST = 14:35 UTC, 9:35 AM EDT = 13:35 UTC
+# Market close: 4:05 PM EST = 21:05 UTC, 4:05 PM EDT = 20:05 UTC
+# Weekly review: Sunday 8 PM EST = Monday 01:00 UTC
+[triggers]
+crons = [
+  "35 13 * * 1-5",
+  "35 14 * * 1-5",
+  "5 20 * * 1-5",
+  "5 21 * * 1-5",
+  "0 1 * * 1"
+]
+
+# D1 Database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "stocktrade"
+database_id = "97602d21-3ebe-4285-95c1-e004def6177d"
+
+# KV Namespace binding
+[[kv_namespaces]]
+binding = "KV"
+id = "d12503a5a14e4b3384b8e9065c76b509"
+
+# R2 Bucket binding
+[[r2_buckets]]
+binding = "REPORTS"
+bucket_name = "stocktrade-reports"
+
+# Workers AI binding for weekly review
+[ai]
+binding = "AI"
+
+# Email binding for daily reports
+# Requires Email Routing enabled on your domain with michael.zemel@gmail.com verified
+[[send_email]]
+name = "EMAIL"
+destination_address = "michael.zemel@gmail.com"
