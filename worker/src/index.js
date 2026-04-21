@@ -136,6 +136,13 @@ export default {
         return Response.json({ unpaused: agentId });
       }
 
+      // GET /debug/signals — dry-run entry evaluation, returns all signal results without trading
+      if (path === '/debug/signals' && request.method === 'GET') {
+        const { debugSignals } = await import('./orchestrator.js');
+        const result = await debugSignals(env);
+        return Response.json(result);
+      }
+
       return new Response('Not found', { status: 404 });
     } catch (e) {
       return Response.json({ error: e.message, stack: e.stack }, { status: 500 });

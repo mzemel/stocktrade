@@ -362,6 +362,113 @@ async function processAgentClose(alpaca, database, agent, currentPrices, indicat
   return { closed, snapshot };
 }
 
+// ── Debug: dry-run signal evaluation ──
+
+export async function debugSignals(env) {
+  const alpaca = new AlpacaClient(env.ALPACA_API_KEY, env.ALPACA_SECRET_KEY);
+
+  const agents = await db.getActiveAgents(env.DB);
+  const allSymbols = [...ALL_SYMBOLS, ...ALL_ETFS];
+
+  // Debug: test a single small fetch first to see raw response shape
+  let rawSample;
+  try {
+    const testResp = await alpaca.request(
+      'https://data.alpaca.markets',
+      '/v2/stocks/bars',
+      { params: { symbols: 'AAPL', timeframe: '1Day', limit: '5' } }
+    );
+    rawSample = {
+      keys: Object.keys(testResp),
+      bars_type: typeof testResp.bars,
+      bars_keys: testResp.bars ? Object.keys(testResp.bars) : null,
+      aapl_count: testResp.bars?.AAPL?.length ?? testResp.bars?.aapl?.length ?? 'missing',
+      first_bar: testResp.bars?.AAPL?.[0] ?? testResp.bars?.aapl?.[0] ?? null,
+      next_page_token: testResp.next_page_token,
+    };
+  } catch (e) {
+    rawSample = { error: e.message };
+  }
+
+  const barsResp = await alpaca.getMultiBars(allSymbols, { timeframe: '1Day', limit: 80 });
+  const barsMap = barsResp.bars || {};
+
+  // Report which symbols got data and which didn't
+  const dataStatus = {};
+  for (const symbol of allSymbols) {
+    const bars = barsMap[symbol];
+    dataStatus[symbol] = bars ? bars.length : 0;
+  }
+
+  const indicatorsMap = {};
+  for (const symbol of allSymbols) {
+    const bars = barsMap[symbol];
+    if (bars && bars.length >= 20) {
+      indicatorsMap[symbol] = computeIndicators(bars);
+    }
+  }
+
+  const sectorStrengths = computeSectorStrengths(indicatorsMap);
+  const context = {
+    sectorStrengths,
+    fundamentals: await loadFundamentals(env.KV),
+  };
+
+  // Sample a few key indicators for the response
+  const indicatorSamples = {};
+  for (const symbol of ALL_SYMBOLS.slice(0, 6)) {
+    const ind = indicatorsMap[symbol];
+    if (ind) {
+      indicatorSamples[symbol] = {
+        price: ind.price,
+        rsi14: ind.rsi14?.toFixed(1),
+        momentum5: ind.momentum5 != null ? (ind.momentum5 * 100).toFixed(2) + '%' : null,
+        momentum20: ind.momentum20 != null ? (ind.momentum20 * 100).toFixed(2) + '%' : null,
+        sma10: ind.sma10?.toFixed(2),
+        sma30: ind.sma30?.toFixed(2),
+        bb20_upper: ind.bb20?.upper?.toFixed(2),
+        bb20_middle: ind.bb20?.middle?.toFixed(2),
+        volume_ratio: ind.avgVolume20 ? (ind.volume / ind.avgVolume20).toFixed(2) + 'x' : null,
+        low52w: ind.low52w?.toFixed(2),
+        pct_from_low: ind.low52w ? ((ind.price - ind.low52w) / ind.low52w * 100).toFixed(1) + '%' : null,
+      };
+    }
+  }
+
+  // Evaluate every agent against every applicable symbol and collect results
+  const signalResults = {};
+  const uniqueStrategies = [...new Set(agents.map(a => a.strategy))];
+
+  for (const strategy of uniqueStrategies) {
+    // Pick one representative agent per strategy to avoid 30x duplication
+    const agent = agents.find(a => a.strategy === strategy && a.personality === 'balanced')
+      || agents.find(a => a.strategy === strategy);
+    const params = agent.params;
+    const symbols = getAgentSymbols(strategy);
+
+    signalResults[strategy] = { agent_id: agent.id, params, signals: [] };
+    for (const symbol of symbols) {
+      const indicators = indicatorsMap[symbol];
+      if (!indicators) {
+        signalResults[strategy].signals.push({ symbol, signal: false, reason: 'No indicator data' });
+        continue;
+      }
+      const { signal, reason } = evaluateEntry(strategy, symbol, indicators, params, context);
+      signalResults[strategy].signals.push({ symbol, signal, reason });
+    }
+  }
+
+  return {
+    raw_sample: rawSample,
+    symbols_with_data: Object.keys(indicatorsMap).length,
+    symbols_without_data: allSymbols.filter(s => !indicatorsMap[s]).length,
+    data_status: dataStatus,
+    indicator_samples: indicatorSamples,
+    sector_strengths: sectorStrengths,
+    signal_results: signalResults,
+  };
+}
+
 // ── Helpers ──
 
 function getAgentSymbols(strategy) {

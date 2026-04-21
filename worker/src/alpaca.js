@@ -156,16 +156,47 @@ export class AlpacaClient {
 
   // Get historical bars for multiple symbols
   // timeframe: '1Day', '1Hour', etc.
-  // Returns { bars: { AAPL: [...], MSFT: [...] }, next_page_token }
-  async getMultiBars(symbols, { timeframe = '1Day', start, end, limit = 60 } = {}) {
-    const params = {
-      symbols: symbols.join(','),
-      timeframe,
-      limit: String(limit),
-    };
-    if (start) params.start = start;
-    if (end) params.end = end;
-    return this.request(DATA_BASE, '/v2/stocks/bars', { params });
+  // Returns { bars: { AAPL: [...], MSFT: [...] } }
+  //
+  // NOTE: Alpaca's limit is TOTAL across all symbols, not per-symbol.
+  // With 36 symbols and limit=80, you'd get ~2 bars per symbol.
+  // We fetch in small batches to ensure each symbol gets enough bars.
+  async getMultiBars(symbols, { timeframe = '1Day', start, end, limit = 80 } = {}) {
+    // Default start to ~120 calendar days ago to ensure enough trading days
+    // Alpaca defaults to "beginning of current day" if start is omitted,
+    // which returns only 1 bar — not enough for any indicator calculation.
+    if (!start) {
+      const d = new Date();
+      d.setDate(d.getDate() - Math.ceil(limit * 1.8)); // ~1.8x for weekends/holidays
+      start = d.toISOString().split('T')[0];
+    }
+
+    const allBars = {};
+    // Batch into groups of 5 symbols so each gets enough bars within the limit
+    const batchSize = 5;
+    for (let i = 0; i < symbols.length; i += batchSize) {
+      const batch = symbols.slice(i, i + batchSize);
+      let pageToken = null;
+      // Paginate to collect all bars for this batch
+      do {
+        const params = {
+          symbols: batch.join(','),
+          timeframe,
+          start,
+          limit: String(limit * batch.length),
+        };
+        if (end) params.end = end;
+        if (pageToken) params.page_token = pageToken;
+        const resp = await this.request(DATA_BASE, '/v2/stocks/bars', { params });
+        const bars = resp.bars || {};
+        for (const [symbol, symbolBars] of Object.entries(bars)) {
+          if (!allBars[symbol]) allBars[symbol] = [];
+          allBars[symbol].push(...symbolBars);
+        }
+        pageToken = resp.next_page_token || null;
+      } while (pageToken);
+    }
+    return { bars: allBars };
   }
 
   // Get latest quotes for multiple symbols

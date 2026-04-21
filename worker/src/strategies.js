@@ -75,11 +75,13 @@ function momentumEntry(symbol, ind, params) {
     return { signal: false, reason: 'Insufficient data for momentum' };
   }
 
-  // Entry: strong momentum AND positive short-term trend
-  if (mom > 0.05 * threshold && shortMom > 0) {
-    return { signal: true, reason: `Momentum ${(mom * 100).toFixed(1)}% over ${lookback}d, 5d trend positive at ${(shortMom * 100).toFixed(1)}%` };
+  // Entry: positive momentum over lookback AND positive short-term trend
+  // threshold scales the minimum: 0.75 threshold → 1.5% min momentum
+  const minMomentum = 0.02 * threshold;
+  if (mom > minMomentum && shortMom > -0.005) {
+    return { signal: true, reason: `Momentum ${(mom * 100).toFixed(1)}% over ${lookback}d, 5d trend ${(shortMom * 100).toFixed(1)}%` };
   }
-  return { signal: false, reason: `Momentum ${(mom * 100).toFixed(1)}% below threshold` };
+  return { signal: false, reason: `Momentum ${(mom * 100).toFixed(1)}% below threshold ${(minMomentum * 100).toFixed(1)}%` };
 }
 
 function momentumExit(symbol, ind, params, trade) {
@@ -94,18 +96,18 @@ function momentumExit(symbol, ind, params, trade) {
 
 function meanReversionEntry(symbol, ind, params) {
   const rsiPeriod = params.rsi_period || 14;
-  const entryRsi = params.entry_rsi || 30;
+  const entryRsi = params.entry_rsi || 40;
 
   const rsiVal = rsiPeriod === 7 ? ind.rsi7 : rsiPeriod === 21 ? ind.rsi21 : ind.rsi14;
   if (rsiVal === null) {
     return { signal: false, reason: 'Insufficient data for RSI' };
   }
 
-  // Entry: RSI oversold
+  // Entry: RSI below threshold (approaching oversold)
   if (rsiVal < entryRsi) {
     return { signal: true, reason: `RSI(${rsiPeriod}) = ${rsiVal.toFixed(1)} < ${entryRsi} (oversold)` };
   }
-  return { signal: false, reason: `RSI(${rsiPeriod}) = ${rsiVal.toFixed(1)} above entry threshold` };
+  return { signal: false, reason: `RSI(${rsiPeriod}) = ${rsiVal.toFixed(1)} above entry threshold ${entryRsi}` };
 }
 
 function meanReversionExit(symbol, ind, params, trade) {
@@ -155,20 +157,22 @@ function trendFollowingExit(symbol, ind, params, trade) {
 
 function volatilityBreakoutEntry(symbol, ind, params) {
   const bbPeriod = params.bb_period || 20;
-  const volThreshold = params.volume_threshold || 1.5;
+  const volThreshold = params.volume_threshold || 1.2;
 
   const bb = bbPeriod === 10 ? ind.bb10 : bbPeriod === 30 ? ind.bb30 : ind.bb20;
-  if (!bb || ind.avgVolume20 === null) {
+  if (!bb || ind.avgVolume20 === null || ind.avgVolume20 === 0) {
     return { signal: false, reason: 'Insufficient data for Bollinger Bands' };
   }
 
   const volumeRatio = ind.volume / ind.avgVolume20;
 
-  // Entry: price above upper band on high volume
-  if (ind.price > bb.upper && volumeRatio > volThreshold) {
-    return { signal: true, reason: `Price ${ind.price.toFixed(2)} > BB upper ${bb.upper.toFixed(2)}, volume ${volumeRatio.toFixed(1)}x avg` };
+  // Entry: price near or above upper band on above-average volume
+  // "Near" = within 0.5 standard deviations of upper band
+  const nearUpper = ind.price > (bb.upper - 0.5 * bb.std);
+  if (nearUpper && volumeRatio > volThreshold) {
+    return { signal: true, reason: `Price ${ind.price.toFixed(2)} near BB upper ${bb.upper.toFixed(2)}, volume ${volumeRatio.toFixed(1)}x avg` };
   }
-  return { signal: false, reason: 'No breakout detected' };
+  return { signal: false, reason: `No breakout: price ${ind.price.toFixed(2)}, BB upper ${bb.upper.toFixed(2)}, vol ${volumeRatio.toFixed(1)}x` };
 }
 
 function volatilityBreakoutExit(symbol, ind, params, trade) {
@@ -214,22 +218,35 @@ function sectorRotationExit(symbol, ind, params, trade) {
 
 function valueEntry(symbol, ind, params, context) {
   const { fundamentals } = context;
-  if (!fundamentals || !fundamentals[symbol]) {
-    return { signal: false, reason: 'No fundamental data available' };
-  }
 
-  const f = fundamentals[symbol];
-  const peThreshold = params.pe_threshold_pctile || 0.25;
-  const minDivYield = params.min_dividend_yield || 0.02;
+  // If we have fundamental data from KV, use it
+  if (fundamentals && fundamentals[symbol]) {
+    const f = fundamentals[symbol];
+    const peThreshold = params.pe_threshold_pctile || 0.25;
+    const minDivYield = params.min_dividend_yield || 0.02;
 
-  // Simple value check: low P/E and decent dividend
-  // Note: In paper mode, we'll use basic heuristics since we don't have a full fundamental data feed
-  if (f.pe_ratio && f.pe_ratio < 20 && f.pe_ratio > 0) {
-    if (f.dividend_yield && f.dividend_yield > minDivYield) {
-      return { signal: true, reason: `P/E ${f.pe_ratio.toFixed(1)} (low), div yield ${(f.dividend_yield * 100).toFixed(1)}%` };
+    if (f.pe_ratio && f.pe_ratio < 20 && f.pe_ratio > 0) {
+      if (f.dividend_yield && f.dividend_yield > minDivYield) {
+        return { signal: true, reason: `P/E ${f.pe_ratio.toFixed(1)} (low), div yield ${(f.dividend_yield * 100).toFixed(1)}%` };
+      }
     }
+    return { signal: false, reason: 'Does not meet fundamental value criteria' };
   }
-  return { signal: false, reason: 'Does not meet value criteria' };
+
+  // Fallback: price-based value heuristics when no fundamental data available
+  // Look for stocks trading near 52-week lows with recovering RSI
+  if (ind.rsi14 === null || ind.low52w === null) {
+    return { signal: false, reason: 'Insufficient data for value heuristics' };
+  }
+
+  const pctFromLow = (ind.price - ind.low52w) / ind.low52w;
+  const rsiRecovering = ind.rsi14 > 30 && ind.rsi14 < 45;
+  const nearLow = pctFromLow < 0.15; // Within 15% of 52-week low
+
+  if (nearLow && rsiRecovering) {
+    return { signal: true, reason: `Near 52w low (${(pctFromLow * 100).toFixed(1)}% above), RSI recovering at ${ind.rsi14.toFixed(1)}` };
+  }
+  return { signal: false, reason: `Not near value territory: ${(pctFromLow * 100).toFixed(0)}% from 52w low, RSI ${ind.rsi14?.toFixed(1)}` };
 }
 
 function valueExit(symbol, ind, params, trade) {
